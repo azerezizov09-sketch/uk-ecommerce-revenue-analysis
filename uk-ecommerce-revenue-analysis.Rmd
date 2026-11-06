@@ -1,0 +1,434 @@
+---
+title: "Revenue Analysis and Customer-Level Aggregation on UK E-Commerce Data"
+author: "Azer Ezizov"
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+
+## Setup 
+
+
+```{r setup, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+library(tidyverse)
+library(lubridate)
+library(scales)
+
+df <- read.csv("data.csv", fileEncoding = "latin1", na.strings = c("", "NA"))
+```
+
+## Task 1
+
+
+```{r task1, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+dim(df)
+glimpse(df)
+colSums(is.na(df))
+
+cat("Ləğv edilmiş sətirlər (InvoiceNo C ilə başlayır):", sum(str_starts(df$InvoiceNo, "C")), "\n")
+cat("Mənfi Quantity sətirləri:", sum(df$Quantity < 0), "\n")
+cat("UnitPrice <= 0 sətirləri:", sum(df$UnitPrice <= 0), "\n")
+```
+
+## Task 2
+
+**Təmizləmə, 1-ci hissə.**
+
+```{r task2, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+df <- df %>%
+  mutate(InvoiceDate  = mdy_hm(InvoiceDate),
+         is_cancelled = str_starts(InvoiceNo, "C"))
+
+cat("Tarix çevrilməsində NA sayı:", sum(is.na(df$InvoiceDate)), "\n")
+print(range(df$InvoiceDate))
+
+cancelled <- df %>% filter(is_cancelled)
+
+cat("Ləğv edilmiş sətir sayı:          ", nrow(cancelled), "\n")
+cat("Ləğv edilmiş unikal sifariş sayı: ", n_distinct(cancelled$InvoiceNo), "\n")
+cat("Bütün unikal sifariş sayı:        ", n_distinct(df$InvoiceNo), "\n")
+cat("Mənfi Quantity, amma C ilə başlamayan sətir:", sum(df$Quantity < 0 & !df$is_cancelled), "\n")
+cat("Boş CustomerID olan sətir:        ", sum(is.na(df$CustomerID)), "\n")
+```
+
+## Task 3
+
+**Təmizləmə, 2-ci hissə və gəlir mühəndisliyi.** 
+
+```{r task3, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+df <- df %>% mutate(Revenue = Quantity * UnitPrice)
+
+sales <- df %>%
+  filter(!is_cancelled, Quantity > 0, UnitPrice > 0)
+
+sales_cust <- sales %>%
+  filter(!is.na(CustomerID))
+
+cat("sales sətir sayı:       ", format(nrow(sales), big.mark = ","), "\n")
+cat("sales_cust sətir sayı:  ", format(nrow(sales_cust), big.mark = ","), "\n")
+cat("sales ümumi gəlir:      ", format(round(sum(sales$Revenue), 2), big.mark = ","), "\n")
+cat("sales_cust ümumi gəlir: ", format(round(sum(sales_cust$Revenue), 2), big.mark = ","), "\n")
+```
+
+## Task 4
+
+**Müştəri üzrə aqreqasiya:** 
+```{r task4, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+customer_summary <- sales_cust %>%
+  group_by(CustomerID) %>%
+  summarise(total_revenue   = sum(Revenue),
+            total_orders    = n_distinct(InvoiceNo),
+            avg_order_value = total_revenue / total_orders,
+            .groups = "drop") %>%
+  arrange(desc(total_revenue))
+
+net_by_customer <- df %>%
+  filter(!is.na(CustomerID)) %>%
+  group_by(CustomerID) %>%
+  summarise(net_revenue = sum(Revenue), .groups = "drop")
+
+customer_summary <- customer_summary %>%
+  left_join(net_by_customer, by = "CustomerID")
+
+customer_summary %>%
+  slice_head(n = 10) %>%
+  mutate(across(c(total_revenue, avg_order_value, net_revenue), ~ round(.x, 2)))
+
+customer_summary %>%
+  summarise(customers            = n(),
+            revenue_sum          = sum(total_revenue),
+            orders_sum           = sum(total_orders),
+            overall_aov          = revenue_sum / orders_sum,
+            median_customer_aov  = median(avg_order_value),
+            repeat_customers_pct = mean(total_orders > 1) * 100) %>%
+  mutate(across(everything(), ~ round(.x, 2)))
+```
+
+## Task 5
+
+**Ölkə üzrə aqreqasiya:** 
+
+```{r task5, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+country_summary <- sales %>%
+  group_by(Country) %>%
+  summarise(total_revenue = sum(Revenue),
+            order_count   = n_distinct(InvoiceNo),
+            .groups = "drop") %>%
+  mutate(avg_order_value   = total_revenue / order_count,
+         revenue_share_pct = total_revenue / sum(total_revenue) * 100) %>%
+  arrange(desc(total_revenue))
+
+country_summary %>%
+  slice_head(n = 10) %>%
+  mutate(across(c(total_revenue, avg_order_value, revenue_share_pct), ~ round(.x, 2)))
+```
+
+## Task 6
+
+**Aylıq gəlir trendi və pik aylar.** 
+
+```{r task6, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+monthly <- sales %>%
+  mutate(Month = as.Date(floor_date(InvoiceDate, "month"))) %>%
+  group_by(Month) %>%
+  summarise(total_revenue = sum(Revenue), .groups = "drop") %>%
+  mutate(share_pct = total_revenue / sum(total_revenue) * 100)
+
+peak_months <- monthly %>% slice_max(total_revenue, n = 3)
+
+print(monthly, n = 13)
+print(peak_months)
+```
+
+## Task 7
+
+**Ən çox satılan 20 məhsul**
+
+```{r task7, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+top_products <- sales %>%
+  filter(!is.na(Description)) %>%
+  group_by(Description) %>%
+  summarise(total_quantity = sum(Quantity),
+            total_revenue  = sum(Revenue),
+            .groups = "drop") %>%
+  arrange(desc(total_quantity)) %>%
+  slice_head(n = 20)
+
+print(top_products, n = 20)
+```
+
+## Task 8
+
+**Return rate (ləğv nisbəti) ölkə üzrə:**
+
+```{r task8, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+orders_total <- df %>%
+  group_by(Country) %>%
+  summarise(total_orders = n_distinct(InvoiceNo), .groups = "drop")
+
+orders_cancelled <- cancelled %>%
+  group_by(Country) %>%
+  summarise(cancelled_orders = n_distinct(InvoiceNo), .groups = "drop")
+
+return_rate <- orders_total %>%
+  left_join(orders_cancelled, by = "Country") %>%
+  mutate(cancelled_orders = replace_na(cancelled_orders, 0L),
+         return_rate_pct  = cancelled_orders / total_orders * 100)
+
+overall_rate <- sum(return_rate$cancelled_orders) / sum(return_rate$total_orders) * 100
+min_orders   <- 30
+
+return_rate <- return_rate %>%
+  mutate(high_return = total_orders >= min_orders & return_rate_pct > 1.5 * overall_rate)
+
+cat("Ümumi return rate (%):", round(overall_rate, 2), "\n")
+cat("Yüksək iadə həddi (%):", round(1.5 * overall_rate, 2), "\n")
+
+return_rate %>%
+  filter(total_orders >= min_orders) %>%
+  arrange(desc(return_rate_pct)) %>%
+  mutate(return_rate_pct = round(return_rate_pct, 2))
+```
+
+## Task 9
+
+**Vizuallaşdırma 1: aylıq gəlir xətti.**
+
+```{r task9, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+peak <- monthly %>% slice_max(total_revenue, n = 1)
+
+p1 <- ggplot(monthly, aes(x = Month, y = total_revenue)) +
+  geom_line(linewidth = 1, color = "steelblue") +
+  geom_point(color = "steelblue") +
+  geom_point(data = peak, color = "red", size = 3) +
+  geom_text(data = peak,
+            aes(label = paste0(format(Month, "%b %Y"), ": £", round(total_revenue / 1e6, 2), "M")),
+            vjust = -1, color = "red") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %y") +
+  scale_y_continuous(labels = label_comma(prefix = "£")) +
+  expand_limits(y = max(monthly$total_revenue) * 1.1) +
+  labs(title = "Monthly Revenue (Dec 2010 - Dec 2011)",
+       x = "Month", y = "Revenue",
+       caption = "Dec 2011 is a partial month (data ends 9 Dec 2011)") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p1)
+ggsave("plots/01_monthly_revenue.png", p1, width = 10, height = 5, dpi = 150)
+```
+
+## Task 10
+
+**Vizuallaşdırma 2: top 10 ölkə (gəlirə görə).**
+```{r task10, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+top10_countries <- country_summary %>% slice_head(n = 10)
+
+p2 <- ggplot(top10_countries,
+             aes(x = reorder(Country, total_revenue), y = total_revenue)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = paste0(round(revenue_share_pct, 1), "%")),
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(labels = label_comma(prefix = "£"),
+                     expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Top 10 Countries by Revenue (with % share)",
+       x = "Country", y = "Revenue") +
+  theme_minimal(base_size = 12)
+
+print(p2)
+ggsave("plots/02_top10_countries.png", p2, width = 9, height = 5, dpi = 150)
+
+top10_no_uk <- country_summary %>%
+  filter(Country != "United Kingdom") %>%
+  slice_head(n = 10)
+
+p2b <- ggplot(top10_no_uk,
+              aes(x = reorder(Country, total_revenue), y = total_revenue)) +
+  geom_col(fill = "darkorange") +
+  geom_text(aes(label = paste0(round(revenue_share_pct, 1), "%")),
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(labels = label_comma(prefix = "£"),
+                     expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Top 10 Countries by Revenue (excluding United Kingdom)",
+       x = "Country", y = "Revenue") +
+  theme_minimal(base_size = 12)
+
+print(p2b)
+ggsave("plots/02b_top10_countries_no_uk.png", p2b, width = 9, height = 5, dpi = 150)
+```
+
+## Task 11
+
+**Vizuallaşdırma 3: top 20 məhsul (üfüqi bar chart).**
+
+```{r task11, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+p3 <- ggplot(top_products,
+             aes(x = reorder(Description, total_quantity), y = total_quantity)) +
+  geom_col(fill = "seagreen") +
+  geom_text(aes(label = comma(total_quantity)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  scale_y_continuous(labels = label_comma(),
+                     expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Top 20 Products by Quantity Sold",
+       x = NULL, y = "Total quantity sold") +
+  theme_minimal(base_size = 11)
+
+print(p3)
+ggsave("plots/03_top20_products.png", p3, width = 11, height = 7, dpi = 150)
+```
+
+## Task 12
+
+**Vizuallaşdırma 4: ölkə üzrə return rate.**
+
+```{r task12, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+rr_plot <- return_rate %>% filter(total_orders >= min_orders)
+
+p4 <- ggplot(rr_plot,
+             aes(x = reorder(Country, return_rate_pct), y = return_rate_pct, fill = high_return)) +
+  geom_col() +
+  geom_text(aes(label = paste0(round(return_rate_pct, 1), "%")),
+            hjust = -0.1, size = 3.5) +
+  geom_hline(yintercept = overall_rate, linetype = "dashed") +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "firebrick", "FALSE" = "grey60"),
+                    labels = c("TRUE" = "High-return market", "FALSE" = "Normal"),
+                    name = "") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Return Rate by Country (countries with 30+ orders)",
+       subtitle = paste0("Dashed line = overall return rate (", round(overall_rate, 1), "%)"),
+       x = "Country", y = "Cancelled orders / total orders (%)") +
+  theme_minimal(base_size = 12)
+
+print(p4)
+ggsave("plots/04_return_rate_by_country.png", p4, width = 9, height = 6, dpi = 150)
+```
+
+## Task 13
+
+**Bonus 1: gəlirə görə top 10 müştəri və onların aylıq xərcləmə trendi.*
+
+```{r task13, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+top10_customers <- customer_summary %>%
+  slice_head(n = 10) %>%
+  pull(CustomerID)
+
+all_months <- seq(as.Date("2010-12-01"), as.Date("2011-12-01"), by = "month")
+
+top10_monthly <- sales_cust %>%
+  filter(CustomerID %in% top10_customers) %>%
+  mutate(Month = as.Date(floor_date(InvoiceDate, "month"))) %>%
+  group_by(CustomerID, Month) %>%
+  summarise(revenue = sum(Revenue), .groups = "drop") %>%
+  complete(CustomerID, Month = all_months, fill = list(revenue = 0)) %>%
+  mutate(CustomerID = factor(CustomerID, levels = top10_customers))
+
+p5 <- ggplot(top10_monthly, aes(x = Month, y = revenue)) +
+  geom_line(color = "steelblue", linewidth = 0.9) +
+  geom_point(color = "steelblue", size = 1.3) +
+  facet_wrap(~ CustomerID, ncol = 2, scales = "free_y") +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b %y") +
+  scale_y_continuous(labels = label_comma(prefix = "£")) +
+  labs(title = "Monthly Spending of Top 10 Customers",
+       x = "Month", y = "Revenue") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p5)
+ggsave("plots/05_top10_customers_monthly.png", p5, width = 11, height = 10, dpi = 150)
+```
+
+## Task 14
+
+**Bonus 2: basket size (qaimə başına orta unikal məhsul sayı) ölkə üzrə.*
+
+```{r task14, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+invoice_items <- sales %>%
+  group_by(Country, InvoiceNo) %>%
+  summarise(unique_products = n_distinct(StockCode), .groups = "drop")
+
+basket_size <- invoice_items %>%
+  group_by(Country) %>%
+  summarise(orders = n(),
+            avg_basket_size = mean(unique_products),
+            .groups = "drop") %>%
+  arrange(desc(avg_basket_size))
+
+overall_basket <- mean(invoice_items$unique_products)
+cat("Bütün ölkələr üzrə orta basket size:", round(overall_basket, 1), "\n")
+
+basket_size %>%
+  filter(orders >= min_orders) %>%
+  mutate(avg_basket_size = round(avg_basket_size, 1))
+
+p6 <- basket_size %>%
+  filter(orders >= min_orders) %>%
+  ggplot(aes(x = reorder(Country, avg_basket_size), y = avg_basket_size)) +
+  geom_col(fill = "mediumpurple") +
+  geom_text(aes(label = round(avg_basket_size, 1)), hjust = -0.1, size = 3.5) +
+  geom_hline(yintercept = overall_basket, linetype = "dashed") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Average Basket Size by Country (countries with 30+ orders)",
+       subtitle = paste0("Dashed line = overall average (", round(overall_basket, 1), " unique products per invoice)"),
+       x = "Country", y = "Avg unique products per invoice") +
+  theme_minimal(base_size = 12)
+
+print(p6)
+ggsave("plots/06_basket_size_by_country.png", p6, width = 9, height = 6, dpi = 150)
+```
+
+## Task 15
+
+**5 biznes insight-ı üçün əlavə rəqəmlər.** Aşağıdakı hesablamalar `note.md`-dəki insight-ları əsaslandırır: mövsümilik, coğrafi konsentrasiya, müştəri konsentrasiyası, return rate və ləğvlərin gəlirə təsiri.
+
+```{r task15, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+# 1) Mövsümilik
+sep_nov <- monthly %>%
+  filter(Month >= as.Date("2011-09-01"), Month <= as.Date("2011-11-01"))
+cat("1) Sentyabr-Noyabr payı (%):", round(sum(sep_nov$share_pct), 1), "\n")
+cat("   Pik ayın payı (%):       ", round(max(monthly$share_pct), 1), "\n\n")
+
+# 2) Coğrafi konsentrasiya və ölkə üzrə orta sifariş dəyəri
+cat("2) Ən böyük 5 bazar:\n")
+country_summary %>%
+  slice_head(n = 5) %>%
+  select(Country, revenue_share_pct, order_count, avg_order_value) %>%
+  mutate(across(c(revenue_share_pct, avg_order_value), ~ round(.x, 2))) %>%
+  print()
+
+# 3) Müştəri konsentrasiyası və sadiqlik
+total_cust_rev <- sum(customer_summary$total_revenue)
+n_cust         <- nrow(customer_summary)
+share_top      <- function(k) sum(head(customer_summary$total_revenue, k)) / total_cust_rev * 100
+
+cat("\n3) Müştəri sayı:", n_cust, "\n")
+cat("   Top 5 müştərinin payı (%):  ", round(share_top(5), 1), "\n")
+cat("   Top 10 müştərinin payı (%): ", round(share_top(10), 1), "\n")
+cat("   Top 10% müştərinin payı (%):", round(share_top(floor(n_cust * 0.1)), 1), "\n")
+cat("   Təkrar alıcı payı (%):      ", round(mean(customer_summary$total_orders > 1) * 100, 1), "\n\n")
+
+# 4) Return rate
+cat("4) Ümumi return rate (%):", round(overall_rate, 1), "\n")
+return_rate %>%
+  filter(high_return) %>%
+  arrange(desc(return_rate_pct)) %>%
+  mutate(return_rate_pct = round(return_rate_pct, 1)) %>%
+  print()
+
+# 5) Ləğvlərin gəlirə təsiri (ümumi və top müştərilər)
+cancelled_value <- -sum(cancelled$Revenue)
+cat("\n5) Ləğv edilmiş sifarişlərin dəyəri:", format(round(cancelled_value, 0), big.mark = ","), "\n")
+cat("   Ümumi gəlirə nisbəti (%):         ", round(cancelled_value / sum(sales$Revenue) * 100, 1), "\n")
+
+customer_summary %>%
+  slice_head(n = 10) %>%
+  mutate(cancelled_value = total_revenue - net_revenue) %>%
+  select(CustomerID, total_revenue, net_revenue, cancelled_value) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 0))) %>%
+  print()
+```
